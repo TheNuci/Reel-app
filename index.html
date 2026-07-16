@@ -1725,36 +1725,88 @@ const procStepsRecipe=["Listening to the video…","Reading the ingredients…",
 const procStepsVisual=["Scanning the video…","No spoken recipe found…","Looking at the dish…","Identifying ingredients…","Recreating the recipe…"];
 let lastMode='recipe'; // 'recipe' = extracted, 'visual' = AI-recreated from food
 let pendingImport=null; // mode to resume after signup/paywall
-function runProcess(mode){
-  lastMode = mode || 'recipe';   // remember mode even if we have to auth/pay first
+// ── REAL BACKEND ─────────────────────────────────────────────
+// Your live Netlify function that turns a pasted link into a recipe.
+const BACKEND_URL = "https://stupendous-starship-62a728.netlify.app/.netlify/functions/from-link";
+
+function fmtTime(s){ const m=Math.floor(s/60), ss=String(Math.floor(s%60)).padStart(2,'0'); return `${m}:${ss}`; }
+
+// Turn the backend's recipe JSON into the shape openSheet() expects.
+function mapBackendRecipe(r){
+  return {
+    baseServings: r.servings || 2,
+    ingredients: (r.ingredients||[]).map(i=>({ name:i.name, amt:(i.amount===null?null:i.amount), unit:i.unit||'' })),
+    steps: (r.steps||[]).map(s=>({ t:s.timestamp||0, time:(s.timestamp!=null?fmtTime(s.timestamp):''), txt:s.text })),
+    videoDuration: 60,
+    stats: {
+      kcal: r.nutrition?.kcal || 0,
+      prot: r.nutrition?.protein || 0,
+      carb: r.nutrition?.carbs || 0,
+      fat:  r.nutrition?.fat || 0,
+    },
+  };
+}
+
+async function runProcess(mode){
+  lastMode = mode || 'recipe';
   // must create a profile first
   if(!hasProfile){ pendingImport=lastMode; openAuth(); return; }
   // free imports used up → must subscribe
   if(!isSubscribed && freeLeft <= 0){ pendingImport=lastMode; openPaywall('credits'); return; }
+
+  const url = (document.getElementById('linkInput')?.value||'').trim();
+  if(!url){ showToast('Paste a TikTok or Instagram link first'); return; }
+
+  // show the processing overlay and cycle the messages while we wait
   const steps = lastMode==='visual' ? procStepsVisual : procStepsRecipe;
   proc.classList.add('on'); let i=0; procLabel.innerHTML=steps[0];
-  const iv=setInterval(()=>{
-    i++;
-    if(i<steps.length){ procLabel.innerHTML=steps[i]; }
-    else{
-      clearInterval(iv); proc.classList.remove('on');
-      if(!isSubscribed){
-        freeLeft--;
-        const cn=document.getElementById('creditNum');
-        cn.textContent=Math.max(freeLeft,0);
-        if(freeLeft<=0){ cn.style.background='var(--gold-grad)'; }
-      }
-      openSheet({ visual: (lastMode==='visual'), origin:'import' });
+  const iv=setInterval(()=>{ i=(i+1)%steps.length; procLabel.innerHTML=steps[i]; }, 900);
+
+  try {
+    const res = await fetch(BACKEND_URL, {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    clearInterval(iv); proc.classList.remove('on');
+
+    if(!res.ok || data.error){
+      showToast(data.error || "Couldn't read a recipe from that link");
+      return;
     }
-  }, 560);
+
+    const r = data.recipe;
+    const visual = (r.confidence === 'low');
+
+    // count the import against the free allowance
+    if(!isSubscribed){
+      freeLeft--;
+      const cn=document.getElementById('creditNum');
+      cn.textContent=Math.max(freeLeft,0);
+      if(freeLeft<=0){ cn.style.background='var(--gold-grad)'; }
+    }
+
+    const mins = r.totalMinutes ? `${r.totalMinutes} min` : '';
+    const chips = visual
+      ? `<span class="chip" style="color:var(--magenta);border-color:rgba(248,87,198,0.3)">✨ AI-recreated</span>${r.cuisine?`<span class="chip">${r.cuisine}</span>`:''}${mins?`<span class="chip">${mins}</span>`:''}`
+      : `<span class="chip hot">🔥 From a reel</span>${r.cuisine?`<span class="chip">${r.cuisine}</span>`:''}${mins?`<span class="chip">${mins}</span>`:''}`;
+
+    openSheet({
+      origin: 'import',
+      visual,
+      title: r.title,
+      chips,
+      by: r.source ? `from ${r.source.platform} · <b>@${r.source.author}</b>` : '',
+      img: r.source?.thumbnail || (visual ? VISUAL_IMG : IMG_MAIN),
+      data: mapBackendRecipe(r),
+    });
+  } catch(err) {
+    clearInterval(iv); proc.classList.remove('on');
+    showToast('Network error — try again');
+  }
 }
-document.getElementById('goBtn').addEventListener('click', ()=>{
-  // detect video type from the pasted link (demo heuristic).
-  // In the real app this is decided by the AI after scanning the video.
-  const link=(document.getElementById('linkInput')?.value||'').toLowerCase();
-  const isFoodOnly = link.includes('food') || link.includes('mukbang') || link.trim()==='';
-  runProcess(isFoodOnly ? 'visual' : 'recipe');
-});
+document.getElementById('goBtn').addEventListener('click', ()=> runProcess('recipe'));
 document.getElementById('creditsPill').addEventListener('click', ()=>{ if(!isSubscribed) openPaywall('freeinfo'); });
 
 /* ---------- SAVE + CART (always free) ---------- */
